@@ -17,7 +17,7 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 from stcm import STCM
 
 # Huggingface login
-login(token="hf_YOUR_TOKEN")
+login(token="")
 
 # Cuda support
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -133,7 +133,7 @@ def save_log(log_data: list, log_dir: str):
     
     print(f"Log saved to {log_filename}")
 
-def main(model_name):
+def main(model_name, params):
     # Logger
     LOG = {}
     
@@ -144,7 +144,10 @@ def main(model_name):
     LOG["Model"] = model_name
     
     # Logit processor
-    stcm = STCM(allowed_tokens=["A"], tokenizer=tokenizer, penalty=1.0, temperature=1.0)
+    if params["stcm"] is not None:
+        penalty = params["stcm"]["penalty"]
+        temperature = params["stcm"]["temperature"]
+        stcm = STCM(allowed_tokens=["A", "B", "C", "D"], tokenizer=tokenizer, penalty=penalty, temperature=temperature)
     
     logits_processor = LogitsProcessorList()
     logits_processor.append(stcm)
@@ -162,7 +165,7 @@ def main(model_name):
         "ANSWER": [],
     }
     
-    test = {
+    test_DEBUG = {
         "LOGIT_before": [],
         "LOGIT_after": [],
     }
@@ -190,12 +193,13 @@ def main(model_name):
             #streamer=streamer # print the model prediction in real time
         )
         
-        generated_text1 = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
-        generated_text = stcm.generate()
-        
         # Collect Answer
-        pred = generated_text[0].strip()
-        #pred = generated_text[len(prompt):].strip()
+        if params["stcm"] is not None:
+            generated_text = stcm.generate()
+            pred = generated_text[0].strip()
+        else:
+            generated_text = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
+            pred = generated_text[len(prompt):].strip()
         
         # Save round result
         result["PREDICTION"].append(pred)
@@ -206,8 +210,8 @@ def main(model_name):
         #outputs.to("cpu")
         
         #ids = tokenizer.convert_tokens_to_ids("A")
-        #test["LOGIT_before"].append(inputs["input_ids"][0][ids])
-        #test["LOGIT_after"].append(outputs[ids])
+        #test_DEBUG["LOGIT_before"].append(inputs["input_ids"][0][ids])
+        #test_DEBUG["LOGIT_after"].append(outputs[ids])
 
     # Compute metrics
     metrics = calculate_metrics(result["ANSWER"], result["PREDICTION"], allow_random=False)
@@ -216,8 +220,9 @@ def main(model_name):
     # Save log:
     LOG["PREDICTION"] = result["PREDICTION"]
     #LOG["ANSWER"] = result["ANSWER"]
-    #LOG["LOGIT_before"] = test["LOGIT_before"]
-    #LOG["LOGIT_after"] = test["LOGIT_after"]
+    #LOG["LOGIT_before"] = test_DEBUG["LOGIT_before"]
+    #LOG["LOGIT_after"] = test_DEBUG["LOGIT_after"]
+    LOG["param"] = params
     
     LOG.update(metrics)
     
@@ -244,5 +249,15 @@ if __name__ == "__main__":
     
     # Qwen report: https://arxiv.org/pdf/2412.15115
     model_list = ["huggyllama/llama-7b", "Qwen/Qwen2.5-0.5B", "Qwen/Qwen2.5-1.5B", "Qwen/Qwen2.5-3B", "Qwen/Qwen2.5-7B", "Qwen/Qwen2.5-14B", "Qwen/Qwen2.5-32B", "meta-llama/Llama-3.2-1B", "google/gemma-3-4b-it"]
+    
+    penalty_list = [0.0, 0.2, 0.4, 0.8, 1.0]
+    temperature_list = [1.0, 0.95, 0.9]
+    
     set_random_seed(42)
-    main(model_list[1])
+    for i in range(1, 5):
+        for j in penalty_list:
+            for k in temperature_list:
+                params = {
+                    "stcm": {"penalty": j, "temperature": k},
+                }
+                main(model_list[i], params=params)
