@@ -17,7 +17,8 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 from stcm import STCM
 
 # Huggingface login
-login(token="")
+HUGGINGFACE_TOKEN = -1
+login(token=HUGGINGFACE_TOKEN)
 
 # Cuda support
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -133,7 +134,7 @@ def save_log(log_data: list, log_dir: str):
     
     print(f"Log saved to {log_filename}")
 
-def main(model_name, params):
+def main(model_name, params, debug: bool=False):
     # Logger
     LOG = {}
     
@@ -147,7 +148,7 @@ def main(model_name, params):
     if params["stcm"] is not None:
         penalty = params["stcm"]["penalty"]
         temperature = params["stcm"]["temperature"]
-        stcm = STCM(allowed_tokens=["A", "B", "C", "D"], tokenizer=tokenizer, penalty=penalty, temperature=temperature)
+        stcm = STCM(allowed_tokens=["A", "B", "C", "D"], tokenizer=tokenizer, penalty=penalty, temperature=temperature, debug_mode=debug)
     
     logits_processor = LogitsProcessorList()
     logits_processor.append(stcm)
@@ -164,12 +165,8 @@ def main(model_name, params):
         "PREDICTION": [],
         "ANSWER": [],
     }
-    
-    test_DEBUG = {
-        "LOGIT_before": [],
-        "LOGIT_after": [],
-    }
-    
+
+    # help(tokenizer)
     for data in tqdm(dataset, desc="Evaluating"):
         # Dependency for mmlu
         prompt = data["question"]   
@@ -177,7 +174,6 @@ def main(model_name, params):
         
         # input token
         inputs = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
-        # inputs = tokenizer(prompt, return_tensors="pt")
         inputs.to(device)
         
         # output token
@@ -206,22 +202,19 @@ def main(model_name, params):
         result["ANSWER"].append(ans)
         
         # TEST
-        #inputs.to("cpu")
-        #outputs.to("cpu")
-        
         #ids = tokenizer.convert_tokens_to_ids("A")
-        #test_DEBUG["LOGIT_before"].append(inputs["input_ids"][0][ids])
-        #test_DEBUG["LOGIT_after"].append(outputs[ids])
+
+    # debug
+    if debug:
+        LOG["debug_info"] = stcm.dump_debug()
 
     # Compute metrics
     metrics = calculate_metrics(result["ANSWER"], result["PREDICTION"], allow_random=False)
     print("Metrics:", metrics)
     
     # Save log:
-    LOG["PREDICTION"] = result["PREDICTION"]
+    #LOG["PREDICTION"] = result["PREDICTION"]
     #LOG["ANSWER"] = result["ANSWER"]
-    #LOG["LOGIT_before"] = test_DEBUG["LOGIT_before"]
-    #LOG["LOGIT_after"] = test_DEBUG["LOGIT_after"]
     LOG["param"] = params
     
     LOG.update(metrics)
@@ -247,6 +240,8 @@ if __name__ == "__main__":
         "dola_low": {"do_sample": False, "dola_layers": "low"}
     }
     
+    debug_mode = True
+    
     # Qwen report: https://arxiv.org/pdf/2412.15115
     model_list = ["huggyllama/llama-7b", "Qwen/Qwen2.5-0.5B", "Qwen/Qwen2.5-1.5B", "Qwen/Qwen2.5-3B", "Qwen/Qwen2.5-7B", "Qwen/Qwen2.5-14B", "Qwen/Qwen2.5-32B", "meta-llama/Llama-3.2-1B", "google/gemma-3-4b-it"]
     
@@ -260,4 +255,5 @@ if __name__ == "__main__":
                 params = {
                     "stcm": {"penalty": j, "temperature": k},
                 }
-                main(model_list[i], params=params)
+                main(model_list[i], params=params, debug=debug_mode)
+                break

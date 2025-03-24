@@ -3,6 +3,59 @@ import torch
 import torch.nn.functional as F
 from transformers import LogitsProcessor, PreTrainedTokenizer, PreTrainedTokenizerFast
 
+class evaluator():
+    def __init__(self, allowed_tokens, allow_token_id):
+        #self.tokenizor = tokenizor
+        self.allow_token = allowed_tokens # str
+        self.allow_token_id = allow_token_id # torch tensor
+        self.buffer = {
+            # Save the max token for each round
+            "in_token": [],
+            "out_token": [],
+        }
+    
+    def set_in_token(self, token):
+        self.buffer["in_token"].append(token)
+        return
+    
+    def set_out_token(self, token):
+        self.buffer["out_token"].append(token)
+        return
+    
+    def dump(self, tokenizer):
+        # Print the case distribution (Analysis part)
+        # TBD!!!
+        result = {
+            "in_word": [],
+            "out_word": [],
+            "changed": 0, "his_changed": [],
+            "nochanged": 0, 
+        }
+        
+        # Decode token into word
+        result["in_word"] = tokenizer.batch_decode(
+            self.buffer["in_token"],
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False
+        )
+        
+        result["out_word"] = tokenizer.batch_decode(
+            self.buffer["out_token"],
+            skip_special_tokens=True,
+            clean_up_tokenization_spaces=False
+        )
+        
+        # Analysis (TBD)
+        for i in range(len(result["in_word"])):
+            if result["in_word"][i] == result["out_word"][i]:
+                result["nochanged"] += 1
+            else:
+                result["changed"] += 1
+                result["his_changed"].append([result["in_word"], result["out_word"]])
+                
+        #print(result)
+        return {"changed": result["changed"], "nochanged": result["nochanged"], "history": result["his_changed"]}
+    
 class STCM(LogitsProcessor):
     """Selective Token Constraint Mechanism (STCM)"""
     def __init__(
@@ -10,7 +63,9 @@ class STCM(LogitsProcessor):
         allowed_tokens: list[str],
         tokenizer: PreTrainedTokenizer | PreTrainedTokenizerFast,
         penalty: float = None,
-        temperature: float = 1.0
+        temperature: float = 1.0,
+        
+        debug_mode: bool = None,
     ) -> None:
         super().__init__()
         if not allowed_tokens:
@@ -36,9 +91,19 @@ class STCM(LogitsProcessor):
 
         self.cumulative_scores = None
         self.tokenizer = tokenizer
+        
+        # Debug mode: checking for token distribution
+        self.debug_mode = debug_mode
+        if self.debug_mode:
+            self.evaluator = evaluator(allowed_tokens=allowed_tokens, allow_token_id=self.allowed_token_ids)
 
     def __call__(self, input_ids: torch.Tensor, scores: torch.Tensor) -> torch.Tensor:
+        
+        # Debug mode: checking for token distribution
+        if self.debug_mode:
+            self.evaluator.set_in_token(torch.argmax(scores, dim=-1))
 
+        # STCM algo init
         allowed_mask = torch.zeros(scores.size(-1), dtype=torch.bool, device=scores.device)
         allowed_mask[self.allowed_token_ids] = True
 
@@ -70,8 +135,17 @@ class STCM(LogitsProcessor):
         top_token_ids = torch.argmax(self.cumulative_scores, dim=-1)
         self.cumulative_scores = None
 
+        # Debug mode: checking for token distribution
+        if self.debug_mode:
+            self.evaluator.set_out_token(top_token_ids)
+
         return self.tokenizer.batch_decode(
             top_token_ids.unsqueeze(0),
             skip_special_tokens=True,
             clean_up_tokenization_spaces=False
         )
+        
+    # Function for debug_mode #
+    def dump_debug(self):
+        return self.evaluator.dump(tokenizer=self.tokenizer)
+        
