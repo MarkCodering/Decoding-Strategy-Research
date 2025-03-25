@@ -47,13 +47,14 @@ class evaluator():
         
         # Analysis (TBD)
         for i in range(len(result["in_word"])):
-            if result["in_word"][i] == result["out_word"][i]:
+            in_word = result["in_word"][i].replace(" ", "")
+            out_word = result["out_word"][i].replace(" ", "")
+            if in_word == out_word:
                 result["nochanged"] += 1
             else:
                 result["changed"] += 1
-                result["his_changed"].append([result["in_word"], result["out_word"]])
+                result["his_changed"].append(f"{result["in_word"]}-{result["out_word"]}")
                 
-        #print(result)
         return {"changed": result["changed"], "nochanged": result["nochanged"], "history": result["his_changed"]}
     
 class STCM(LogitsProcessor):
