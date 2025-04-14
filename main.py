@@ -1,8 +1,10 @@
 import os
+import csv
 import json
 import random
 from datetime import datetime
 from typing import Literal
+import argparse
 
 from huggingface_hub import login
 from transformers import (
@@ -27,7 +29,7 @@ from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_sc
 from stcm import STCM
 
 # Huggingface login
-access_token = "PUT_YOUR_TOKEN_HERE"
+access_token = "-1"
 login(token=access_token)
 
 # Cuda support
@@ -70,7 +72,7 @@ def load_model(llm_model_or_path: str | None = None, vlm_model_or_path: str | No
     # Load LLM
     if llm_model_or_path: # Not ""
         tokenizer = AutoTokenizer.from_pretrained(
-            llm_model_or_path, trust_remote_code=True, token=access_token
+            llm_model_or_path, trust_remote_code=True, token=access_token,
         )
         
         model = AutoModelForCausalLM.from_pretrained(
@@ -117,26 +119,95 @@ def load_model(llm_model_or_path: str | None = None, vlm_model_or_path: str | No
     return tokenizer, model
 
 # Preprocess
-def preprocess(dataset):
-    # mmlu
-    # Reference: https://github.com/openai/evals/blob/main/examples/mmlu.ipynb
+def load_data(dataset_name: Literal["mmlu", "mmlu-pro"]):
+    # VARIABLE
+    CHOICE = -1
+    
     def mmlu_preprocess(example):
-        choices = ["A", "B", "C", "D"] # Mutiple choice with four option
+        noise = ""
+        
+        CHOICE = ["A", "B", "C", "D"] # Mutiple choice with four option
         sys_msg = f"The following are multiple choice questions (with answers) about {example['subject']}."
         new_question = (
             sys_msg + "\n" + 
             example['question'] + "\n" +
-            "\n".join([f"{choice}. {answer}" for choice, answer in zip(choices, example['choices'])]) +
-            "\nAnswer:"
+            "\n".join([f"{choice}. {answer}" for choice, answer in zip(CHOICE, example['choices'])]) +
+            "\nAnswer:" + noise
         )
         example["question"] = new_question
-        example["answer_str"] = choices[example["answer"]] # Original: 1 -> B
+        example["answer_str"] = CHOICE[example["answer"]] # Original: 1 -> B
         #example["image_url"] = None
         return example
     
-    # default: mmlu_preprocess
-    return dataset.map(mmlu_preprocess)
+    def load_mmlu_pro():
+        # load dataset
+        dataset = load_dataset("TIGER-Lab/MMLU-Pro")
+        test_df  = dataset["test"]
+        #test_df = _mmlu_pro_preprocess(test_df)
+        #val_df = dataset["validation"]
+        #val_df = _mmlu_pro_preprocess(val_df)
+        # process
+        return test_df
+    
+    def mmlu_pro_preprocess(example):
+        noise = " "
+        
+        # Question
+        sys_msg = "The following are multiple choice questions (with answers) about {}.\n".format(example["category"])
+        question = example["question"]
+        options = example["options"]
+        question = sys_msg + "Question: {}\nOptions: ".format(question)
+        choice_map = "ABCDEFGHIJ"
+        for i, opt in enumerate(options):
+            question += "{}. {}\n".format(choice_map[i], opt)
+        question += "Answer: "
+        
+        example["question"] = question
+            
+        # Answer
+        example["answer_str"] = example["answer"]
+        return example
+    
+    """
+    def mmlu_pro_format_example(example): # no CoT
+        # Ref: https://github.com/TIGER-AI-Lab/MMLU-Pro/blob/main/evaluate_from_api.py, format_example()
+        sys_msg = "The following are multiple choice questions (with answers) about {}."
+        question = example["?"]
+        options = example["?"]
+        example = "Question: {}\nOptions: ".format(question)
+        choice_map = "ABCDEFGHIJ"
+        for i, opt in enumerate(options):
+            example += "{}. {}\n".format(choice_map[i], opt)
+            example += "Answer: "
+        return example
+    """
+    
+    # default: None
+    if dataset_name == "mmlu":
+        # Reference: https://github.com/openai/evals/blob/main/examples/mmlu.ipynb
+        dataset = load_dataset("cais/mmlu", "all", split="test")
+        return dataset.map(mmlu_preprocess)
+    elif dataset_name == "mmlu-pro":
+        # Reference: https://github.com/TIGER-AI-Lab/MMLU-Pro/blob/main/evaluate_from_api.py
+        test_df = load_mmlu_pro()
+        return test_df.map(mmlu_pro_preprocess)
+    else:
+        # ERROR
+        raise NotImplementedError()
 
+def get_prompt(data, dataset_name: Literal["mmlu", "mmlu-pro"]):   
+    if dataset_name == "mmlu":
+        prompt = data["question"]   
+        ans = data["answer_str"]
+        return ans, prompt 
+    elif dataset_name == "mmlu-pro":
+        prompt = data["question"]
+        ans = data["answer_str"]
+        return ans, prompt 
+    else:
+        # ERROR
+        raise NotImplementedError()
+    
 # Metrics
 def calculate_metrics(
     all_answers: list,
@@ -148,7 +219,8 @@ def calculate_metrics(
     for pred in predictions:
         # 若預測結果為空字串且允許隨機則補上隨機選項
         if pred == "" and allow_random:
-            choices = ["A", "B", "C", "D"]
+            #choices = ["A", "B", "C", "D"] # mmlu
+            choices = ["A", "B", "C", "D", "E", "F", "G", "H",  "I",  "J"] # mmlu pro
             pred = random.choice(choices)
         elif pred == "":
             choices = ["ELSE"]
@@ -168,6 +240,7 @@ def calculate_metrics(
     }
 
 def save_log(log_data: list, log_dir: str):
+    
     # If log_dir is not exit, than create
     if not os.path.exists(log_dir):
         os.makedirs(log_dir)
@@ -179,19 +252,46 @@ def save_log(log_data: list, log_dir: str):
     with open(log_filename, "w") as f:
         json.dump(log_data, f, indent=4)
     
-    print(f"Log saved to {log_filename}")
+    # Save into csv
+    have_decode = log_data.get("param", {}).get("stcm")
+    row = {
+        "model": log_data.get("Model", ""),
+        "dataset_name": log_data.get("dataset_name", ""),
+        "use_stcm": bool(have_decode),
+        "penalty": have_decode.get("penalty", "") if have_decode else "",
+        "temperature": have_decode.get("temperature", "") if have_decode else "",
+        "accuracy": log_data.get("accuracy", ""),
+        "f1_score": log_data.get("f1_score", ""),
+        "precision": log_data.get("precision", ""),
+        "recall": log_data.get("recall", ""),
+    }
+    
+    csv_filename = os.path.join(log_dir, "experiment.csv")
+    file_exists = os.path.exists(csv_filename)
+    
+    # 寫入或追加 CSV
+    with open(csv_filename, "a", newline="", encoding="utf-8") as csvfile:
+        fieldnames = ["model", "dataset_name", "use_stcm", "penalty", "temperature",
+                      "accuracy", "f1_score", "precision", "recall"]
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+        if not file_exists:
+            writer.writeheader()
+        writer.writerow(row)
+        
+    print(f"Log saved to {log_filename} and {csv_filename}")
 
-def main(llm_model_or_path, vlm_model_or_path, params, debug: bool=False):
+def main(llm_model_or_path, vlm_model_or_path, dataset_name, params, debug: bool=False):
     ### Parameter ###
-    allowed_tokens = ["A", "B", "C", "D"]
+    #allowed_tokens = [" A", " B", " C", " D"] # mmlu
+    allowed_tokens = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"] # mmlu-pro
     
     # Logger
     LOG = {}
+    LOG["Model"] = llm_model_or_path if vlm_model_or_path is None else vlm_model_or_path
+    LOG["dataset_name"] = dataset_name
     
     # Load model   
     tokenizer, model = load_model(llm_model_or_path=llm_model_or_path, vlm_model_or_path=vlm_model_or_path)
-    
-    LOG["Model"] = llm_model_or_path if vlm_model_or_path is None else vlm_model_or_path
     
     # Logit processor
     logits_processor = None
@@ -208,8 +308,7 @@ def main(llm_model_or_path, vlm_model_or_path, params, debug: bool=False):
     streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
 
     # Load dataset: mmlu
-    dataset = load_dataset("cais/mmlu", "all", split="test")
-    dataset = preprocess(dataset)
+    dataset = load_data(dataset_name=dataset_name)
     
     # Evaluation Loop
     result = {
@@ -218,11 +317,8 @@ def main(llm_model_or_path, vlm_model_or_path, params, debug: bool=False):
     }
 
     for data in tqdm(dataset, desc="Evaluating"):
-        # Dependency for mmlu
-        prompt = data["question"]   
-        ans = data["answer_str"]
-        
         # Get: input token
+        ans, prompt = get_prompt(data=data, dataset_name=dataset_name)
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
         
         # Get: output token
@@ -247,12 +343,12 @@ def main(llm_model_or_path, vlm_model_or_path, params, debug: bool=False):
             generated_text = tokenizer.batch_decode(outputs, skip_special_tokens=True)[0]
             pred = generated_text[len(prompt):].strip()
         
-        # Save round result
+        # Save round result:
         result["PREDICTION"].append(pred)
         result["ANSWER"].append(ans)
         
     # debug
-    if debug:
+    if debug and params["stcm"] is not None:
         LOG["debug_info"] = stcm.dump_debug()
 
     # Compute metrics
@@ -267,7 +363,22 @@ def main(llm_model_or_path, vlm_model_or_path, params, debug: bool=False):
     LOG.update(metrics)
     
     save_log(LOG, "log")
-        
+
+def get_parse():
+    parser = argparse.ArgumentParser(description="Run evaluation with customizable parameters")
+    parser.add_argument('--model_name_or_path', type=str, required=True, choices=[
+            "Qwen/Qwen2.5-0.5B", "Qwen/Qwen2.5-1.5B", "Qwen/Qwen2.5-3B", "Qwen/Qwen2.5-7B", 
+            "meta-llama/Llama-3.2-1B", "huggyllama/llama-7b" 
+        ], help="Path or name of the model to evaluate")
+    parser.add_argument('--dataset_name', type=str, default="mmlu", choices=["mmlu", "mmlu-pro"], help="Dataset name")
+    parser.add_argument('--use_stcm', action='store_true', help="Enable STCM if flag is provided")
+    parser.add_argument('--stcm_penalty', type=float, default=0.4, help="Penalty value for STCM")
+    parser.add_argument('--stcm_temperature', type=float, default=1.0, help="Temperature value for STCM")
+    parser.add_argument('--debug_mode', action='store_true', help="Enable debug mode")
+    parser.add_argument('--max_token_size', type=int, default=1, help="Maximum token size for generation")
+    args = parser.parse_args()
+    return args
+  
 if __name__ == "__main__":
     """
         Collection:
@@ -276,24 +387,9 @@ if __name__ == "__main__":
     # Random seed
     set_random_seed(42)
     
-    # TEST
-    strategy_params = {
-        "greedy": {},
-        "contrastive": {"penalty_alpha": 0.6, "top_k": 4},
-        "sampling": {"do_sample": True, "num_beams": 1},
-        "beam_search": {"num_beams": 5},
-        "beam_search_sampling": {"do_sample": True, "num_beams": 5},
-        "diverse_beam_search": {
-            "do_sample": False, "num_beams": 5, "num_beam_groups": 5, "diversity_penalty": 1.0
-        },
-        "self_speculative": {"do_sample": False, "assistant_early_exit": 4},
-        "dola_high": {"do_sample": False, "dola_layers": "high"},
-        "dola_low": {"do_sample": False, "dola_layers": "low"}
-    }
-    
     ### Parameter setting ###
     params = {
-        "stcm": {"penalty": 0.0, "temperature": 1.0},
+        "stcm": {"penalty": 0.4, "temperature": 1.0},
     }
     debug_mode = True
     
@@ -308,31 +404,28 @@ if __name__ == "__main__":
         "meta-llama/Llama-3.2-1B", 
         "huggyllama/llama-7b" # llama-3.1 version
     ]
-    support_vlm_list = [
-        "Qwen/Qwen2-VL-7B-Instruct", 
-        "Qwen/Qwen2.5-VL-3B-Instruct",
-        "liuhaotian/llava-v1.5-7b",
-    ]
     
     # TEST: LLM
     #main(llm_model_or_path="Qwen/Qwen2.5-0.5B", vlm_model_or_path=None, params=params, debug=debug_mode)
     #main(llm_model_or_path="meta-llama/Llama-3.2-1B", vlm_model_or_path=None, params=params, debug=debug_mode)
+    #main(llm_model_or_path="meta-llama/Llama-3.2-3B", vlm_model_or_path=None, params=params, debug=debug_mode)
     #main(llm_model_or_path="google/gemma-3-4b-it", vlm_model_or_path=None, params=params, debug=debug_mode) # Not support
     
-    # TEST: VLM (BUG)
-    #main(llm_model_or_path=None, vlm_model_or_path="Qwen/Qwen2.5-VL-3B-Instruct", params={}, debug=False)
-    #main(llm_model_or_path=None, vlm_model_or_path="Qwen/Qwen2.5-VL-3B-Instruct", params=params, debug=True)
-    #main(llm_model_or_path=None, vlm_model_or_path="Qwen/Qwen2.5-VL-3B-Instruct", params=params, debug=False)
-    
-    
     # Experiment
-    llm_list = ["meta-llama/Llama-3.2-1B", "huggyllama/llama-7b"]
-    penalty_list = [0.0, 0.4, 0.8, 1.0]
-    temperature_list = [1.0, 0.95]
+    #llm_list = ["Qwen/Qwen2.5-0.5B", "Qwen/Qwen2.5-1.5B", "meta-llama/Llama-3.2-1B", "huggyllama/llama-7b"]
+    #llm_list = ["Qwen/Qwen2.5-0.5B", "Qwen/Qwen2.5-1.5B", "meta-llama/Llama-3.2-3B", "meta-llama/Llama-2-7b", "meta-llama/Llama-3.1-8B"]
+    #llm_list = ["Qwen/Qwen2.5-7B", "meta-llama/Llama-3.2-3B", "meta-llama/Llama-2-7b", "meta-llama/Llama-3.1-8B"]
+    llm_list = ["Qwen/Qwen2.5-0.5B", "Qwen/Qwen2.5-1.5B", "Qwen/Qwen2.5-3B", "Qwen/Qwen2.5-7B", 
+                "meta-llama/Llama-3.2-1B", "meta-llama/Llama-3.2-3B", "huggyllama/llama-7b",
+                "tiiuae/Falcon3-1B-Base", "tiiuae/Falcon3-3B-Base", "tiiuae/Falcon3-7B-Base",
+            ]
+    penalty_list = [0.0, 0.2, 0.3, 0.4, 0.8, 1.0]
+    temperature_list = [1.0]
     for model_name in llm_list:
-        for penalty in penalty_list:
+        #for penalty in penalty_list:
             for temp in temperature_list:
-                params = {
-                    "stcm": {"penalty": penalty, "temperature": temp},
+                _params = {
+                    #"stcm": {"penalty": penalty, "temperature": temp},
+                    "stcm": None,
                 }
-                main(llm_model_or_path=model_name, vlm_model_or_path=None, params=params, debug=debug_mode)
+                main(llm_model_or_path=model_name, vlm_model_or_path=None, dataset_name="mmlu", params=_params, debug=debug_mode)
