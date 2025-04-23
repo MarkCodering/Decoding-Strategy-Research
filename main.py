@@ -119,12 +119,12 @@ def load_model(llm_model_or_path: str | None = None, vlm_model_or_path: str | No
     return tokenizer, model
 
 # Preprocess
-def load_data(dataset_name: Literal["mmlu", "mmlu-pro"]):
+def load_data(dataset_name: Literal["mmlu", "mmlu-pro", "commonsenseqa"]):
     # VARIABLE
     CHOICE = -1
     
     def mmlu_preprocess(example):
-        noise = ""
+        noise = " "
         
         CHOICE = ["A", "B", "C", "D"] # Mutiple choice with four option
         sys_msg = f"The following are multiple choice questions (with answers) about {example['subject']}."
@@ -149,6 +149,20 @@ def load_data(dataset_name: Literal["mmlu", "mmlu-pro"]):
         # process
         return test_df
     
+    """
+    def mmlu_pro_format_example(example): # no CoT
+        # Ref: https://github.com/TIGER-AI-Lab/MMLU-Pro/blob/main/evaluate_from_api.py, format_example()
+        sys_msg = "The following are multiple choice questions (with answers) about {}."
+        question = example["?"]
+        options = example["?"]
+        example = "Question: {}\nOptions: ".format(question)
+        choice_map = "ABCDEFGHIJ"
+        for i, opt in enumerate(options):
+            example += "{}. {}\n".format(choice_map[i], opt)
+            example += "Answer: "
+        return example
+    """
+    
     def mmlu_pro_preprocess(example):
         noise = " "
         
@@ -168,19 +182,24 @@ def load_data(dataset_name: Literal["mmlu", "mmlu-pro"]):
         example["answer_str"] = example["answer"]
         return example
     
-    """
-    def mmlu_pro_format_example(example): # no CoT
-        # Ref: https://github.com/TIGER-AI-Lab/MMLU-Pro/blob/main/evaluate_from_api.py, format_example()
-        sys_msg = "The following are multiple choice questions (with answers) about {}."
-        question = example["?"]
-        options = example["?"]
-        example = "Question: {}\nOptions: ".format(question)
-        choice_map = "ABCDEFGHIJ"
-        for i, opt in enumerate(options):
-            example += "{}. {}\n".format(choice_map[i], opt)
-            example += "Answer: "
+    def commonsenseqa_preprocess(example):
+        noise = " "
+        
+        # Label 列表
+        labels = ["A", "B", "C", "D", "E"]
+
+        # 原始問題文字
+        q = example["question"]
+
+        # 開始組出新的 prompt
+        formatted = f"Question: {q}\n"
+        for label, choice in zip(labels, example["choices"]["text"]):
+            formatted += f"{label}. {choice}\n"
+        formatted += "Answer: "
+
+        # 把欄位改成我們後續呼叫 get_prompt 能取到的格式
+        example["question"] = formatted
         return example
-    """
     
     # default: None
     if dataset_name == "mmlu":
@@ -191,11 +210,15 @@ def load_data(dataset_name: Literal["mmlu", "mmlu-pro"]):
         # Reference: https://github.com/TIGER-AI-Lab/MMLU-Pro/blob/main/evaluate_from_api.py
         test_df = load_mmlu_pro()
         return test_df.map(mmlu_pro_preprocess)
+    elif dataset_name == "commonsenseqa":
+        dataset = load_dataset("tau/commonsense_qa")
+        dataset = dataset["validation"]
+        return dataset.map(commonsenseqa_preprocess)
     else:
         # ERROR
         raise NotImplementedError()
 
-def get_prompt(data, dataset_name: Literal["mmlu", "mmlu-pro"]):   
+def get_prompt(data, dataset_name: Literal["mmlu", "mmlu-pro", "commonsenseqa"]):   
     if dataset_name == "mmlu":
         prompt = data["question"]   
         ans = data["answer_str"]
@@ -204,6 +227,10 @@ def get_prompt(data, dataset_name: Literal["mmlu", "mmlu-pro"]):
         prompt = data["question"]
         ans = data["answer_str"]
         return ans, prompt 
+    elif dataset_name=="commonsenseqa":
+        prompt = data["question"]
+        ans = data["answerKey"]
+        return ans, prompt
     else:
         # ERROR
         raise NotImplementedError()
@@ -219,8 +246,9 @@ def calculate_metrics(
     for pred in predictions:
         # 若預測結果為空字串且允許隨機則補上隨機選項
         if pred == "" and allow_random:
-            #choices = ["A", "B", "C", "D"] # mmlu
-            choices = ["A", "B", "C", "D", "E", "F", "G", "H",  "I",  "J"] # mmlu pro
+            choices = ["A", "B", "C", "D"] # mmlu
+            #choices = ["A", "B", "C", "D", "E", "F", "G", "H",  "I",  "J"] # mmlu pro
+            choices = ["A", "B", "C", "D"] # commonsenseqa
             pred = random.choice(choices)
         elif pred == "":
             choices = ["ELSE"]
@@ -282,13 +310,23 @@ def save_log(log_data: list, log_dir: str):
 
 def main(llm_model_or_path, vlm_model_or_path, dataset_name, params, debug: bool=False):
     ### Parameter ###
-    #allowed_tokens = [" A", " B", " C", " D"] # mmlu
-    allowed_tokens = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"] # mmlu-pro
+    # allow token for decoding strategies
+    if dataset_name == "mmlu":
+        allowed_tokens = ["A", "B", "C", "D"] # mmlu
+    elif dataset_name == "mmlu-pro":
+        allowed_tokens = ["A", "B", "C", "D", "E", "F", "G", "H", "I", "J"] # mmlu-pro
+    elif dataset_name == "commonsenseqa":
+        allowed_tokens = ["A", "B", "C", "D", "E"] # commonsenseqa
+    else:
+        pass
     
     # Logger
     LOG = {}
     LOG["Model"] = llm_model_or_path if vlm_model_or_path is None else vlm_model_or_path
     LOG["dataset_name"] = dataset_name
+    
+    # Load dataset: mmlu, mmlu-pro, commonsenseqa
+    dataset = load_data(dataset_name=dataset_name)
     
     # Load model   
     tokenizer, model = load_model(llm_model_or_path=llm_model_or_path, vlm_model_or_path=vlm_model_or_path)
@@ -306,9 +344,6 @@ def main(llm_model_or_path, vlm_model_or_path, dataset_name, params, debug: bool
     
     # Print token faster
     streamer = TextStreamer(tokenizer, skip_prompt=True, skip_special_tokens=True)
-
-    # Load dataset: mmlu
-    dataset = load_data(dataset_name=dataset_name)
     
     # Evaluation Loop
     result = {
@@ -320,6 +355,10 @@ def main(llm_model_or_path, vlm_model_or_path, dataset_name, params, debug: bool
         # Get: input token
         ans, prompt = get_prompt(data=data, dataset_name=dataset_name)
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
+        
+        if 'token_type_ids' in inputs and model_name == "tiiuae/Falcon3-7B-Base":
+            # Ref: https://huggingface.co/stabilityai/stablecode-instruct-alpha-3b/discussions/7
+            del inputs['token_type_ids']
         
         # Get: output token
         # Doc for .generate(): https://jaketae.github.io/study/gpt2/#setup
@@ -391,7 +430,6 @@ if __name__ == "__main__":
     params = {
         "stcm": {"penalty": 0.4, "temperature": 1.0},
     }
-    debug_mode = True
     
     # TBD: "google/gemma-3-4b-it"
     support_llm_list = [
@@ -405,27 +443,21 @@ if __name__ == "__main__":
         "huggyllama/llama-7b" # llama-3.1 version
     ]
     
-    # TEST: LLM
-    #main(llm_model_or_path="Qwen/Qwen2.5-0.5B", vlm_model_or_path=None, params=params, debug=debug_mode)
-    #main(llm_model_or_path="meta-llama/Llama-3.2-1B", vlm_model_or_path=None, params=params, debug=debug_mode)
-    #main(llm_model_or_path="meta-llama/Llama-3.2-3B", vlm_model_or_path=None, params=params, debug=debug_mode)
-    #main(llm_model_or_path="google/gemma-3-4b-it", vlm_model_or_path=None, params=params, debug=debug_mode) # Not support
-    
     # Experiment
-    #llm_list = ["Qwen/Qwen2.5-0.5B", "Qwen/Qwen2.5-1.5B", "meta-llama/Llama-3.2-1B", "huggyllama/llama-7b"]
-    #llm_list = ["Qwen/Qwen2.5-0.5B", "Qwen/Qwen2.5-1.5B", "meta-llama/Llama-3.2-3B", "meta-llama/Llama-2-7b", "meta-llama/Llama-3.1-8B"]
-    #llm_list = ["Qwen/Qwen2.5-7B", "meta-llama/Llama-3.2-3B", "meta-llama/Llama-2-7b", "meta-llama/Llama-3.1-8B"]
+    debug_mode = True
+    dataset_name = "commonsenseqa"
     llm_list = ["Qwen/Qwen2.5-0.5B", "Qwen/Qwen2.5-1.5B", "Qwen/Qwen2.5-3B", "Qwen/Qwen2.5-7B", 
                 "meta-llama/Llama-3.2-1B", "meta-llama/Llama-3.2-3B", "huggyllama/llama-7b",
                 "tiiuae/Falcon3-1B-Base", "tiiuae/Falcon3-3B-Base", "tiiuae/Falcon3-7B-Base",
             ]
-    penalty_list = [0.0, 0.2, 0.3, 0.4, 0.8, 1.0]
+    penalty_list = [0.0, 0.2, 0.3, 0.4, 0.6, 0.8, 1.0]
     temperature_list = [1.0]
+    
     for model_name in llm_list:
-        #for penalty in penalty_list:
+        for penalty in penalty_list:
             for temp in temperature_list:
                 _params = {
-                    #"stcm": {"penalty": penalty, "temperature": temp},
-                    "stcm": None,
+                    "stcm": {"penalty": penalty, "temperature": temp},
+                    #"stcm": None,
                 }
-                main(llm_model_or_path=model_name, vlm_model_or_path=None, dataset_name="mmlu", params=_params, debug=debug_mode)
+                main(llm_model_or_path=model_name, vlm_model_or_path=None, dataset_name=dataset_name, params=_params, debug=debug_mode)
