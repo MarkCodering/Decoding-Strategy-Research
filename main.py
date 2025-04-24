@@ -192,10 +192,11 @@ def load_data(dataset_name: Literal["mmlu", "mmlu-pro", "commonsenseqa"]):
         q = example["question"]
 
         # 開始組出新的 prompt
-        formatted = f"Question: {q}\n"
+        formatted = f"Please answer the question by generate one token only with the options - A,B,C,D,E: {q}\n"
         for label, choice in zip(labels, example["choices"]["text"]):
             formatted += f"{label}. {choice}\n"
-        formatted += "Answer: "
+        
+        formatted += "Answer: " + noise
 
         # 把欄位改成我們後續呼叫 get_prompt 能取到的格式
         example["question"] = formatted
@@ -409,7 +410,7 @@ def get_parse():
             "Qwen/Qwen2.5-0.5B", "Qwen/Qwen2.5-1.5B", "Qwen/Qwen2.5-3B", "Qwen/Qwen2.5-7B", 
             "meta-llama/Llama-3.2-1B", "huggyllama/llama-7b" 
         ], help="Path or name of the model to evaluate")
-    parser.add_argument('--dataset_name', type=str, default="mmlu", choices=["mmlu", "mmlu-pro"], help="Dataset name")
+    parser.add_argument('--dataset_name', type=str, default="commonsenseqa", choices=["mmlu", "mmlu-pro"], help="Dataset name")
     parser.add_argument('--use_stcm', action='store_true', help="Enable STCM if flag is provided")
     parser.add_argument('--stcm_penalty', type=float, default=0.4, help="Penalty value for STCM")
     parser.add_argument('--stcm_temperature', type=float, default=1.0, help="Temperature value for STCM")
