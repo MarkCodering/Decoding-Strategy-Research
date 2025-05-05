@@ -1,4 +1,6 @@
-"""Selective Token Constraint Mechanism (STCM)"""
+"""
+Token Constraint Decoder (TCD)
+"""
 import torch
 import torch.nn.functional as F
 from transformers import LogitsProcessor, PreTrainedTokenizer, PreTrainedTokenizerFast
@@ -57,8 +59,10 @@ class evaluator():
                 
         return {"changed": result["changed"], "nochanged": result["nochanged"], "history": result["his_changed"]}
     
-class STCM(LogitsProcessor):
-    """Selective Token Constraint Mechanism (STCM)"""
+class TCD(LogitsProcessor):
+    """
+    Token Constraint Decoder (TCD) for controlling the generation of tokens in a sequence.
+    """
     def __init__(
         self,
         allowed_tokens: list[str],
